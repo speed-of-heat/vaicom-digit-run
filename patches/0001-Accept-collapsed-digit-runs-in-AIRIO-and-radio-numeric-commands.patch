@@ -1,0 +1,306 @@
+From 1fb16ad619233c9c92390d4666ecbaf69363f103 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 8 Sep 2026 19:37:26 +0000
+Subject: [PATCH] Accept collapsed digit runs in AIRIO and radio numeric
+ commands
+
+Speech engines apply inverse text normalisation to spoken digit runs, so
+"five eight eight" reaches VoiceAttack as "588" rather than "5 8 8". The
+laser code, datalink tune, TACAN tune and radio frequency handlers read one
+digit per {CMDSEGMENT:n}, which assumes the opposite. When the run collapses
+the command either fails to match or, if a concatenated phrase is used, the
+whole number lands in the first segment and the rest silently parse as zero
+(e.g. "laser code 688" was sent as 68800).
+
+Read the digits with {TXTNUM:"{CMD}"} instead, which returns them in order
+regardless of how the engine segmented them. This is the approach the F-4E
+WSO handlers already use in WSOCommandHandler.GetNumberFromCommand().
+
+Existing profiles that emit one digit per segment produce identical results.
+
+Also replaces the silent zero-fill with a length check, so an unreadable
+command reports rather than actioning a wrong value, and accepts the full
+four-digit laser code since the leading 1 is fixed in hardware.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoPJ1jDEgBWmbo7sEu7QPp
+---
+ .../AIRIO/RIO_SetDeviceSequenceLaserCode.cs   | 30 +++++++----
+ .../RIO_SetDeviceSequenceManualDatalink.cs    | 23 ++++----
+ .../AIRIO/RIO_SetDeviceSequenceManualTACAN.cs | 22 +++++---
+ VAICOM/Extensions/CommandNumbers.cs           | 52 +++++++++++++++++++
+ .../RadioControl/RadioControl_TuneFreq.cs     | 26 +++++-----
+ 5 files changed, 116 insertions(+), 37 deletions(-)
+
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+index e270a18..1e44f2d 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+@@ -30,6 +30,24 @@ namespace VAICOM
+                             return;
+                         }
+ 
++                        // Read the code before building the message, so an unreadable
++                        // command exits without leaving a half-built message behind.
++                        string lasercode = Extensions.CommandNumbers.Digits();
++
++                        // The device's thumbwheels are fixed at 1xxx, so the leading 1 is
++                        // implicit. Accept the full real-world code as well as the short form.
++                        if (lasercode.Length == 4 && lasercode[0] == '1')
++                        {
++                            lasercode = lasercode.Substring(1);
++                        }
++
++                        if (lasercode.Length != 3)
++                        {
++                            Log.Write("Laser code: expected 3 digits, got '" + lasercode + "'", Colors.Warning);
++                            UI.Playsound.Recipientna();
++                            return;
++                        }
++
+                         // else continue
+                         State.currentmessage = new CommsMessage();
+                         setdefaultmessageparams();
+@@ -39,9 +57,7 @@ namespace VAICOM
+                         string header = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:0}");
+                         //Log.Write("Segment 0 = " + header, Colors.Warning);
+ 
+-                        int majval1;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:1}"), out majval1);
+-                        //Log.Write("majval1 = " + majval1, Colors.Warning);
++                        int majval1 = Extensions.CommandNumbers.At(lasercode, 0);
+                         switch (majval1)
+                         {
+                             //case 0:
+@@ -76,9 +92,7 @@ namespace VAICOM
+                                 //    break;
+                         }
+ 
+-                        int majval2;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:2}"), out majval2);
+-                        //Log.Write("majval2 = " + majval2, Colors.Warning);
++                        int majval2 = Extensions.CommandNumbers.At(lasercode, 1);
+                         switch (majval2)
+                         {
+                             //case 0:
+@@ -113,9 +127,7 @@ namespace VAICOM
+                                 //    break;
+                         }
+ 
+-                        int minval;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:3}"), out minval);
+-                        //Log.Write("Segment 3 = " + minval, Colors.Warning);
++                        int minval = Extensions.CommandNumbers.At(lasercode, 2);
+                         switch (minval)
+                         {
+                             //case 0:
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+index 4594fcd..4e5d7ca 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+@@ -46,6 +46,17 @@ namespace VAICOM
+                             return;
+                         }
+ 
++                        // Read the channel before building the message, so an unreadable
++                        // command exits without leaving a half-built message behind.
++                        string dltune = Extensions.CommandNumbers.Digits();
++
++                        if (dltune.Length != 3)
++                        {
++                            Log.Write("Datalink tune: expected 3 digits, got '" + dltune + "'", Colors.Warning);
++                            UI.Playsound.Recipientna();
++                            return;
++                        }
++
+                         // else continue
+                         State.currentmessage = new CommsMessage();
+                         setdefaultmessageparams();
+@@ -58,9 +69,7 @@ namespace VAICOM
+                         string header = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:0}");
+                         //Log.Write("Segment 0 = " + header, Colors.Warning);
+ 
+-                        int majval1;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:1}"), out majval1);
+-                        //Log.Write("majval1 = " + majval1, Colors.Warning);
++                        int majval1 = Extensions.CommandNumbers.At(dltune, 0);
+                         if (isTomcatBU)
+                         {
+                             double value = GetDatalinkTuneDigitValue(majval1);
+@@ -109,9 +118,7 @@ namespace VAICOM
+                             }
+                         }
+ 
+-                        int majval2;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:2}"), out majval2);
+-                        //Log.Write("majval2 = " + majval2, Colors.Warning);
++                        int majval2 = Extensions.CommandNumbers.At(dltune, 1);
+                         if (isTomcatBU)
+                         {
+                             double value = GetDatalinkTuneDigitValue(majval2);
+@@ -160,9 +167,7 @@ namespace VAICOM
+                             }
+                         }
+ 
+-                        int minval;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:4}"), out minval);
+-                        //Log.Write("Segment 3 = " + minval, Colors.Warning);
++                        int minval = Extensions.CommandNumbers.At(dltune, 2);
+                         if (isTomcatBU)
+                         {
+                             double value = GetDatalinkTuneDigitValue(minval);
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualTACAN.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualTACAN.cs
+index 1fa57f0..ba8bc12 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualTACAN.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualTACAN.cs
+@@ -67,6 +67,17 @@ namespace VAICOM
+                             return;
+                         }
+ 
++                        // Read the channel before building the message, so an unreadable
++                        // command exits without leaving a half-built message behind.
++                        string tacanchan = Extensions.CommandNumbers.Digits();
++
++                        if (tacanchan.Length != 3)
++                        {
++                            Log.Write("TACAN tune: expected 3 digits, got '" + tacanchan + "'", Colors.Warning);
++                            UI.Playsound.Recipientna();
++                            return;
++                        }
++
+                         // else continue
+                         State.currentmessage = new CommsMessage();
+                         setdefaultmessageparams();
+@@ -90,10 +101,8 @@ namespace VAICOM
+ 
+                         // major {CMDSEGMENT:2}
+ 
+-                        int majval1;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:2}"), out majval1);
+-                        int majval2;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:3}"), out majval2);
++                        int majval1 = Extensions.CommandNumbers.At(tacanchan, 0);
++                        int majval2 = Extensions.CommandNumbers.At(tacanchan, 1);
+ 
+                         int majval = (10 * majval1) + majval2;
+ 
+@@ -140,9 +149,8 @@ namespace VAICOM
+                                 break;
+                         }
+ 
+-                        // minor {CMDSEGMENT:3}
+-                        int minval;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:4}"), out minval);
++                        // minor: third digit of the channel
++                        int minval = Extensions.CommandNumbers.At(tacanchan, 2);
+ 
+                         switch (minval)
+                         {
+diff --git a/VAICOM/Extensions/CommandNumbers.cs b/VAICOM/Extensions/CommandNumbers.cs
+new file mode 100644
+index 0000000..a840d5e
+--- /dev/null
++++ b/VAICOM/Extensions/CommandNumbers.cs
+@@ -0,0 +1,52 @@
++namespace VAICOM
++{
++
++    namespace Extensions
++    {
++
++        /// <summary>
++        /// Reads numeric parameters out of the spoken command.
++        ///
++        /// Handlers have historically read one digit per {CMDSEGMENT:n}, which assumes the
++        /// speech engine returns every spoken digit as its own token. Engines apply inverse
++        /// text normalisation to digit runs, so "five eight eight" can arrive as three
++        /// segments ("5","8","8"), two ("58","8") or one ("588") depending on the engine,
++        /// the speaker's pacing and the phrasing. When it collapses, a per-segment read
++        /// either fails to match at all or silently zero-fills the missing segments.
++        ///
++        /// {TXTNUM} over the whole spoken command sidesteps that: it returns only the
++        /// digits, in order, however they happened to be segmented. Literal sections in the
++        /// phrase that carry no digits ("decimal", "point", band words such as "am" / "fm"
++        /// or "x-ray" / "yankee") contribute nothing and need no special handling.
++        ///
++        /// This is the approach already used by the F-4E WSO handlers, in
++        /// WSOCommandHandler.GetNumberFromCommand().
++        /// </summary>
++        public static class CommandNumbers
++        {
++
++            /// <summary>
++            /// Digits of the spoken command, in order. Never null.
++            /// </summary>
++            public static string Digits()
++            {
++                string digits = State.Proxy.Utility.ParseTokens("{TXTNUM:\"{CMD}\"}");
++                return digits ?? string.Empty;
++            }
++
++            /// <summary>
++            /// Digit at the given position as an int, or -1 when it is not present.
++            /// </summary>
++            public static int At(string digits, int index)
++            {
++                if (string.IsNullOrEmpty(digits) || index < 0 || index >= digits.Length)
++                {
++                    return -1;
++                }
++
++                return digits[index] - '0';
++            }
++
++        }
++    }
++}
+diff --git a/VAICOM/Extensions/RadioControl/RadioControl_TuneFreq.cs b/VAICOM/Extensions/RadioControl/RadioControl_TuneFreq.cs
+index 95fc493..dc3288f 100644
+--- a/VAICOM/Extensions/RadioControl/RadioControl_TuneFreq.cs
++++ b/VAICOM/Extensions/RadioControl/RadioControl_TuneFreq.cs
+@@ -41,28 +41,30 @@ namespace VAICOM
+ 
+                         Log.Write("Tunemod = " + SendMessage.tunemod, Colors.Inline);
+ 
+-                        // freq first 3 digits
+-                        string majval1 = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:2}");
+-                        SendRadioControlMessage(SendMessage);
++                        // Frequency digits, however the speech engine segmented them:
++                        // three MHz digits followed by up to three fractional digits.
++                        string freqdigits = Extensions.CommandNumbers.Digits();
+ 
+-                        string majval2 = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:3}");
+-                        SendRadioControlMessage(SendMessage);
++                        if (freqdigits.Length < 3)
++                        {
++                            Log.Write("Radio frequency: expected at least 3 digits, got '" + freqdigits + "'", Colors.Inline);
++                            return;
++                        }
+ 
+-                        string majval3 = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:4}");
++                        SendRadioControlMessage(SendMessage);
++                        SendRadioControlMessage(SendMessage);
+                         SendRadioControlMessage(SendMessage);
+ 
+-                        // decimal = {CMDSEGMENT:5}
+-
+-                        string minval1 = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:6}");
+-                        string minval2 = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:7}").Replace(" ", "");
++                        // pad a partially spoken frequency out to MHz.kHz
++                        string freqmhz = (freqdigits + "000000").Substring(0, 6);
+ 
+-                        string combinedfreq = (majval1 + majval2 + majval3 + minval1 + minval2 + "000000000").Substring(0, 9);
++                        string combinedfreq = (freqmhz + "000").Substring(0, 9);
+ 
+                         SendMessage.tunefrq.Add(combinedfreq);
+ 
+                         SendRadioControlMessage(SendMessage);
+ 
+-                        Log.Write("Select Frequency " + band.ToUpper() + "" + majval1 + majval2 + majval3 + "." + minval1 + minval2 + " MHz", Colors.Message);
++                        Log.Write("Select Frequency " + band.ToUpper() + "" + freqmhz.Substring(0, 3) + "." + freqmhz.Substring(3, 3) + " MHz", Colors.Message);
+ 
+                         UI.Playsound.Commandcomplete();
+ 
+-- 
+2.43.0
+
