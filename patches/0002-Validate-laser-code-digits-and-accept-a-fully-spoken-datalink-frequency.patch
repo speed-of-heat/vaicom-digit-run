@@ -1,0 +1,76 @@
+From 9f74767d7a53335f6f16f9dcdc4dd9404c460a37 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 9 Sep 2026 12:08:51 +0000
+Subject: [PATCH] Validate laser code digits and accept a fully spoken datalink
+ frequency
+
+Laser code: the only guard was combinedvalue > 788, which a code such as
+699 passes even though the second and third thumbwheels stop at 8. Those
+digits then match no case in the switches, so no device action is queued
+for them and the aircraft ends up on a different code while the message
+reports the one that was asked for. Check each digit against its own
+wheel range instead.
+
+This became reachable once a profile could use a single collapsed range
+such as [511..788], which generates every number in the span rather than
+only valid codes.
+
+Datalink: the three wheels are the tens, units and tenths of a frequency
+whose leading 3 is fixed in hardware, so accept the frequency spoken in
+full ("three zero five five") as well as the bare wheel digits. This
+mirrors the existing handling of the laser code's implicit leading 1 and
+lets a profile use one range for the whole 000-999 space, which no
+range can otherwise express because leading zeros are dropped.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoPJ1jDEgBWmbo7sEu7QPp
+---
+ .../AIRIO/RIO_SetDeviceSequenceLaserCode.cs          | 12 ++++++++++++
+ .../AIRIO/RIO_SetDeviceSequenceManualDatalink.cs     |  8 ++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+index 1e44f2d..4eaf198 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+@@ -48,6 +48,18 @@ namespace VAICOM
+                             return;
+                         }
+ 
++                        // Each thumbwheel has its own range: 5-7, 1-8, 1-8. Checking only the
++                        // combined value against 788 lets a code such as 699 through, which
++                        // then matches no case below and silently sets a different code.
++                        if (lasercode[0] < '5' || lasercode[0] > '7'
++                            || lasercode[1] < '1' || lasercode[1] > '8'
++                            || lasercode[2] < '1' || lasercode[2] > '8')
++                        {
++                            Log.Write("Laser code: 1" + lasercode + " is not a valid code (wheels are 5-7, 1-8, 1-8)", Colors.Warning);
++                            UI.Playsound.Recipientna();
++                            return;
++                        }
++
+                         // else continue
+                         State.currentmessage = new CommsMessage();
+                         setdefaultmessageparams();
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+index 4e5d7ca..0063043 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+@@ -50,6 +50,14 @@ namespace VAICOM
+                         // command exits without leaving a half-built message behind.
+                         string dltune = Extensions.CommandNumbers.Digits();
+ 
++                        // The three wheels are the tens, units and tenths of a frequency whose
++                        // leading 3 is fixed in hardware, so accept the frequency spoken in
++                        // full ("three zero five five" -> 3055) as well as the bare wheels.
++                        if (dltune.Length == 4 && dltune[0] == '3')
++                        {
++                            dltune = dltune.Substring(1);
++                        }
++
+                         if (dltune.Length != 3)
+                         {
+                             Log.Write("Datalink tune: expected 3 digits, got '" + dltune + "'", Colors.Warning);
+-- 
+2.43.0
+

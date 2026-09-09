@@ -1,0 +1,188 @@
+From f32a103cb2de36477ca93b096f1c6272f37a4324 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 9 Sep 2026 12:59:30 +0000
+Subject: [PATCH] Report rejected AIRIO input on screen, not only to the
+ VoiceAttack log
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A rejected laser code or datalink frequency wrote to the VoiceAttack log
+and played a sound. The player cannot see that log from the cockpit — in
+VR especially, a refused command was indistinguishable from one that
+silently did nothing.
+
+Send the reason as a message instead, with an empty action sequence so no
+device is actuated, matching how the existing out-of-range branch already
+reports. Both handlers now follow the same shape: read the digits, strip
+the fixed prefix if the value was spoken in full, check the length, then
+check the domain, and say which range was expected when rejecting.
+
+Datalink also now names the valid range when the leading digit is not the
+fixed 3, rather than reporting it as an unreadable length.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoPJ1jDEgBWmbo7sEu7QPp
+---
+ .../Extensions/AIRIO/RIO_ReportInputError.cs  | 46 +++++++++++++++++++
+ .../AIRIO/RIO_SetDeviceSequenceLaserCode.cs   | 22 ++++-----
+ .../RIO_SetDeviceSequenceManualDatalink.cs    | 27 ++++++-----
+ 3 files changed, 72 insertions(+), 23 deletions(-)
+
+diff --git a/VAICOM/Extensions/AIRIO/RIO_ReportInputError.cs b/VAICOM/Extensions/AIRIO/RIO_ReportInputError.cs
+new file mode 100644
+index 0000000..1f28fe6
+--- /dev/null
++++ b/VAICOM/Extensions/AIRIO/RIO_ReportInputError.cs
+@@ -0,0 +1,46 @@
++using System.Collections.Generic;
++using VAICOM.PushToTalk;
++using VAICOM.Static;
++
++
++namespace VAICOM
++{
++
++    namespace Client
++    {
++
++        public partial class DcsClient
++        {
++
++            public static partial class Message
++            {
++
++                /// <summary>
++                /// Reports a rejected AIRIO input back to the player.
++                ///
++                /// Input errors previously reached the VoiceAttack log only, which the player
++                /// cannot see from the cockpit — in VR especially, a rejected command was
++                /// indistinguishable from one that silently did nothing. Sending it as a
++                /// message puts the reason on screen alongside the other AIRIO responses,
++                /// with an empty action sequence so no device is actuated.
++                /// </summary>
++                /// <param name="displaymessage">Shown to the player. "AIRIO : " is prefixed.</param>
++                /// <param name="logmessage">Written to the VoiceAttack log.</param>
++                private static void ReportRioInputError(string displaymessage, string logmessage)
++                {
++                    Log.Write(logmessage, Colors.Warning);
++
++                    State.currentmessage.dspmsg = "AIRIO : " + displaymessage + "\n";
++                    State.currentmessage.msgdur = 5;
++                    State.currentmessage.extsequence = new List<Extensions.RIO.DeviceAction>();
++
++                    UI.Playsound.Sorry();
++
++                    SendNewMessage();
++                    State.MessageReset();
++                }
++
++            }
++        }
++    }
++}
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+index 4eaf198..4c8af78 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs
+@@ -30,8 +30,12 @@ namespace VAICOM
+                             return;
+                         }
+ 
+-                        // Read the code before building the message, so an unreadable
+-                        // command exits without leaving a half-built message behind.
++                        // else continue
++                        State.currentmessage = new CommsMessage();
++                        setdefaultmessageparams();
++                        State.currentmessage.type = Messagetypes.DeviceControl;
++                        State.currentmessage.extsequence = new List<Extensions.RIO.DeviceAction>();
++
+                         string lasercode = Extensions.CommandNumbers.Digits();
+ 
+                         // The device's thumbwheels are fixed at 1xxx, so the leading 1 is
+@@ -43,8 +47,8 @@ namespace VAICOM
+ 
+                         if (lasercode.Length != 3)
+                         {
+-                            Log.Write("Laser code: expected 3 digits, got '" + lasercode + "'", Colors.Warning);
+-                            UI.Playsound.Recipientna();
++                            ReportRioInputError("Could not read the laser code.\nSay three digits, or the full code as 1xxx.",
++                                                "Laser code: expected 3 digits, got '" + lasercode + "'");
+                             return;
+                         }
+ 
+@@ -55,17 +59,11 @@ namespace VAICOM
+                             || lasercode[1] < '1' || lasercode[1] > '8'
+                             || lasercode[2] < '1' || lasercode[2] > '8')
+                         {
+-                            Log.Write("Laser code: 1" + lasercode + " is not a valid code (wheels are 5-7, 1-8, 1-8)", Colors.Warning);
+-                            UI.Playsound.Recipientna();
++                            ReportRioInputError("1" + lasercode + " is not a valid laser code.\nRange is 1511 to 1788.",
++                                                "Laser code 1" + lasercode + " is out of range (1511 to 1788)");
+                             return;
+                         }
+ 
+-                        // else continue
+-                        State.currentmessage = new CommsMessage();
+-                        setdefaultmessageparams();
+-                        State.currentmessage.type = Messagetypes.DeviceControl;
+-                        State.currentmessage.extsequence = new List<Extensions.RIO.DeviceAction>();
+-
+                         string header = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:0}");
+                         //Log.Write("Segment 0 = " + header, Colors.Warning);
+ 
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+index 0063043..4f1d084 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs
+@@ -46,31 +46,36 @@ namespace VAICOM
+                             return;
+                         }
+ 
+-                        // Read the channel before building the message, so an unreadable
+-                        // command exits without leaving a half-built message behind.
++                        // else continue
++                        State.currentmessage = new CommsMessage();
++                        setdefaultmessageparams();
++                        State.currentmessage.type = Messagetypes.DeviceControl;
++                        State.currentmessage.extsequence = new List<Extensions.RIO.DeviceAction>();
++
+                         string dltune = Extensions.CommandNumbers.Digits();
+ 
+                         // The three wheels are the tens, units and tenths of a frequency whose
+                         // leading 3 is fixed in hardware, so accept the frequency spoken in
+                         // full ("three zero five five" -> 3055) as well as the bare wheels.
+-                        if (dltune.Length == 4 && dltune[0] == '3')
++                        if (dltune.Length == 4)
+                         {
++                            if (dltune[0] != '3')
++                            {
++                                ReportRioInputError(dltune.Insert(3, ".") + "0 is not a valid datalink frequency.\nRange is 300.00 to 399.90.",
++                                                    "Datalink tune: " + dltune + " is outside 3000-3999");
++                                return;
++                            }
++
+                             dltune = dltune.Substring(1);
+                         }
+ 
+                         if (dltune.Length != 3)
+                         {
+-                            Log.Write("Datalink tune: expected 3 digits, got '" + dltune + "'", Colors.Warning);
+-                            UI.Playsound.Recipientna();
++                            ReportRioInputError("Could not read the datalink frequency.\nSay three digits, or the full frequency as 3xxx.",
++                                                "Datalink tune: expected 3 digits, got '" + dltune + "'");
+                             return;
+                         }
+ 
+-                        // else continue
+-                        State.currentmessage = new CommsMessage();
+-                        setdefaultmessageparams();
+-                        State.currentmessage.type = Messagetypes.DeviceControl;
+-                        State.currentmessage.extsequence = new List<Extensions.RIO.DeviceAction>();
+-
+                         bool isTomcatBU = IsF14BUActive();
+                         Log.Write("AIRIO DL tune detect | state.id=" + (State.currentstate != null ? State.currentstate.id : "<null>") + " | isF14BU=" + isTomcatBU, Colors.Text);
+ 
+-- 
+2.43.0
+
