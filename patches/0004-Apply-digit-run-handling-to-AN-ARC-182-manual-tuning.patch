@@ -1,0 +1,219 @@
+From dcf0b8bf6a94ea53d0d507e39c56079aa3530a94 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 9 Sep 2026 13:43:17 +0000
+Subject: [PATCH] Apply the same digit-run handling to AN/ARC-182 manual tuning
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SetRioDeviceSequence_Radio_Tuning read the frequency as one digit per
+{CMDSEGMENT:n} across segments 1, 2, 3 and 5, so it failed in the same way
+as the other AIRIO numeric commands when the speech engine returned the
+digits as a single number.
+
+Segment 6 (the 00/25/50/75 part) is matched as a string and accepts
+spelled-out and non-English forms that carry no digits, so a plain
+digit-run rewrite would have silently broken them. It is kept, and the
+handler now works either way round:
+
+  - phrase has that section: the digits it contributed are the tail of the
+    run, so they are stripped before the frequency digits are indexed and
+    the existing switch is untouched;
+  - phrase does not: the fraction is taken from the tail of the run.
+
+The second case is what allows the megahertz digits to be collapsed into a
+single section, which is the only shape a speech engine's normalised output
+can match:
+
+  Radio Frequency [30..399] [Point; Decimal] [0..9] [0; 2 5; 5 0; 7 5]
+
+That phrase was impossible to write while the fraction was tied to a fixed
+segment index.
+
+Also rejects a fractional value that is not a 25 kHz step. Previously
+anything else matched no case and queued no keypress for the last two
+digits, tuning a different frequency than the one reported — the same
+silent-wrong-value problem as the laser code wheels. A frequency given to
+whole megahertz now tunes to .0 rather than being rejected.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JoPJ1jDEgBWmbo7sEu7QPp
+---
+ .../AIRIO/RIO_SetDeviceSequenceManualRadio.cs | 89 +++++++++++++++++--
+ VAICOM/Extensions/CommandNumbers.cs           | 27 +++++-
+ 2 files changed, 107 insertions(+), 9 deletions(-)
+
+diff --git a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualRadio.cs b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualRadio.cs
+index ed20339..e187dc0 100644
+--- a/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualRadio.cs
++++ b/VAICOM/Extensions/AIRIO/RIO_SetDeviceSequenceManualRadio.cs
+@@ -53,9 +53,69 @@ namespace VAICOM
+ 
+                         string header = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:0}");
+ 
++                        // Segments 1, 2, 3 and 5 are the frequency digits either side of the
++                        // decimal. Speech engines collapse spoken digit runs, so read them from
++                        // the whole command rather than one per segment.
++                        //
++                        // Segment 6 (the 00/25/50/75 part) is matched as a string further down,
++                        // because it accepts spelled-out and non-English forms that carry no
++                        // digits at all. Two cases:
++                        //
++                        //  - the phrase has that section, so the digits it contributed are the
++                        //    tail of this run: strip them and let the switch below do its work;
++                        //  - the phrase does not, which is what a profile looks like once the
++                        //    megahertz digits are collapsed into a single section: take the
++                        //    fraction from the tail of the run instead.
++                        //
++                        // The second case is what makes a phrase like
++                        //   Radio Frequency [30..399] [Point; Decimal] [0..9] [0; 2 5; 5 0; 7 5]
++                        // work, which cannot be expressed while the fraction is tied to a fixed
++                        // segment index.
++                        string radiodigits = Extensions.CommandNumbers.Digits();
++
++                        string fractionsegment = State.Proxy.Utility.ParseTokens("{CMDSEGMENT:6}");
++                        bool hasfractionsegment = !string.IsNullOrWhiteSpace(fractionsegment)
++                            && !fractionsegment.Equals("Not set", StringComparison.OrdinalIgnoreCase);
++
++                        int fractionfromrun = -1;
++
++                        if (hasfractionsegment)
++                        {
++                            string fractiondigits = Extensions.CommandNumbers.DigitsIn(fractionsegment);
++
++                            if (fractiondigits.Length > 0 && radiodigits.EndsWith(fractiondigits))
++                            {
++                                radiodigits = radiodigits.Substring(0, radiodigits.Length - fractiondigits.Length);
++                            }
++
++                            if (radiodigits.Length < 3 || radiodigits.Length > 4)
++                            {
++                                ReportRioInputError("Could not read the radio frequency.\nSay it as 251 decimal 7 5 0.",
++                                                    "AN/ARC-182 tune: expected 3 or 4 frequency digits, got '" + radiodigits + "'");
++                                return;
++                            }
++
++                            // a frequency given to whole megahertz tunes to .0
++                            radiodigits = (radiodigits + "0").Substring(0, 4);
++                        }
++                        else
++                        {
++                            if (radiodigits.Length < 3 || radiodigits.Length > 6)
++                            {
++                                ReportRioInputError("Could not read the radio frequency.\nSay it as 251 decimal 7 5 0.",
++                                                    "AN/ARC-182 tune: expected 3 to 6 frequency digits, got '" + radiodigits + "'");
++                                return;
++                            }
++
++                            // 251 -> 251.000, 2517 -> 251.700, 251750 -> 251.750
++                            string padded = (radiodigits + "000000").Substring(0, 6);
++
++                            Int32.TryParse(padded.Substring(4, 2), out fractionfromrun);
++                            radiodigits = padded.Substring(0, 4);
++                        }
++
+                         // MAJ 1
+-                        int majval1;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:1}"), out majval1);
++                        int majval1 = Extensions.CommandNumbers.At(radiodigits, 0);
+ 
+                         switch (majval1)
+                         {
+@@ -74,8 +134,7 @@ namespace VAICOM
+                         }
+ 
+                         // MAJ 2
+-                        int majval2;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:2}"), out majval2);
++                        int majval2 = Extensions.CommandNumbers.At(radiodigits, 1);
+ 
+                         switch (majval2)
+                         {
+@@ -112,8 +171,7 @@ namespace VAICOM
+                         }
+ 
+                         // MAJ 3
+-                        int majval3;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:3}"), out majval3);
++                        int majval3 = Extensions.CommandNumbers.At(radiodigits, 2);
+ 
+                         switch (majval3)
+                         {
+@@ -150,8 +208,7 @@ namespace VAICOM
+                         }
+ 
+                         // MIN 1
+-                        int minval1;
+-                        Int32.TryParse(State.Proxy.Utility.ParseTokens("{CMDSEGMENT:5}"), out minval1);
++                        int minval1 = Extensions.CommandNumbers.At(radiodigits, 3);
+ 
+                         switch (minval1)
+                         {
+@@ -281,6 +338,22 @@ namespace VAICOM
+                                 break;
+                         }
+ 
++                        // where the phrase carried no fraction section, the run supplied it
++                        if (!hasfractionsegment)
++                        {
++                            minval2 = fractionfromrun;
++                        }
++
++                        // 00, 25, 50 and 75 are the only values the device accepts. Anything
++                        // else matches no case below and would queue no keypress for the last
++                        // two digits, tuning a different frequency than the one reported.
++                        if (minval2 != 0 && minval2 != 25 && minval2 != 50 && minval2 != 75)
++                        {
++                            ReportRioInputError("Frequency must end in 00, 25, 50 or 75.",
++                                                "AN/ARC-182 tune: fractional value " + minval2 + " is not a 25 kHz step");
++                            return;
++                        }
++
+                         switch (minval2)
+                         {
+                             case 0:
+diff --git a/VAICOM/Extensions/CommandNumbers.cs b/VAICOM/Extensions/CommandNumbers.cs
+index a840d5e..b40bb05 100644
+--- a/VAICOM/Extensions/CommandNumbers.cs
++++ b/VAICOM/Extensions/CommandNumbers.cs
+@@ -1,4 +1,4 @@
+-namespace VAICOM
++﻿namespace VAICOM
+ {
+ 
+     namespace Extensions
+@@ -34,6 +34,31 @@ namespace VAICOM
+                 return digits ?? string.Empty;
+             }
+ 
++            /// <summary>
++            /// The digits contained in an arbitrary string, in order. Never null.
++            /// Used to work out what part of a command's digit run came from a
++            /// particular segment.
++            /// </summary>
++            public static string DigitsIn(string text)
++            {
++                if (string.IsNullOrEmpty(text))
++                {
++                    return string.Empty;
++                }
++
++                System.Text.StringBuilder digits = new System.Text.StringBuilder();
++
++                foreach (char c in text)
++                {
++                    if (c >= '0' && c <= '9')
++                    {
++                        digits.Append(c);
++                    }
++                }
++
++                return digits.ToString();
++            }
++
+             /// <summary>
+             /// Digit at the given position as an int, or -1 when it is not present.
+             /// </summary>
+-- 
+2.43.0
+

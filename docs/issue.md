@@ -1,6 +1,6 @@
 # [BUG] Numeric AIRIO commands fail when the speech engine returns a digit run as a single number
 
-**Affects:** Laser Code, Link Tune (manual datalink), TACAN Tune, Radio Frequency (`dev.radio.setfrq`)
+**Affects:** Laser Code, Link Tune (manual datalink), TACAN Tune, AN/ARC-182 manual tuning, Radio Frequency (`dev.radio.setfrq`)
 **Version:** VAICOM PRO Community Edition 3.1.6.1
 **VoiceAttack:** 2.2.0
 **Source referenced:** `master` @ `3042c825`
@@ -61,6 +61,7 @@ Each segment is assumed to hold exactly one digit. Nothing validates that assump
 | Laser Code | `Extensions/AIRIO/RIO_SetDeviceSequenceLaserCode.cs` | 1, 2, 3 |
 | Link Tune | `Extensions/AIRIO/RIO_SetDeviceSequenceManualDatalink.cs` | 1, 2, 4 |
 | TACAN Tune | `Extensions/AIRIO/RIO_SetDeviceSequenceManualTACAN.cs` | 2, 3, 4 |
+| AN/ARC-182 tuning | `Extensions/AIRIO/RIO_SetDeviceSequenceManualRadio.cs` | 1, 2, 3, 5 (6 is a string) |
 | Radio Frequency | `Extensions/RadioControl/RadioControl_TuneFreq.cs` | 2, 3, 4, 6, 7 |
 
 The F-4E WSO handlers (`wso.*` contexts) are unaffected.
@@ -76,7 +77,7 @@ A collapsed digit run breaks matching first. Fixing parsing alone changes nothin
 
 ## The fix
 
-Three commits.
+Four commits.
 
 ### 1. Read digits with `{TXTNUM:"{CMD}"}`
 
@@ -110,6 +111,19 @@ AIRIO : 1699 is not a valid laser code.
 Range is 1511 to 1788.
 ```
 
+### 4. Free the ARC-182 fraction from a fixed segment index
+
+`SetRioDeviceSequence_Radio_Tuning` reads segment 6 — the `00`/`25`/`50`/`75` part — as a **string**, matched against many spellings including non-English ones (`"2 5"`, `"twenty five"`, `"dos cinco"`, `"zwo funf"`). Those carry no digits, so a plain digit-run rewrite would have silently broken every one of them.
+
+That switch is kept. The handler now works either way round:
+
+- the phrase has that section, so the digits it contributed are the tail of the run: strip them and let the switch do its work;
+- the phrase does not, which is what a profile looks like once the megahertz digits are collapsed into one section: take the fraction from the tail of the run instead.
+
+The second case is the point. While the fraction was tied to segment 6, no collapsed phrase could be written at all — any alternative with fewer bracket sections moved that index and the fraction read nothing. This is the one handler where the profile could not be worked around, which is why it needs the code change to be usable at all.
+
+It also now rejects a fractional value that is not a 25 kHz step. Previously anything else matched no case and queued no keypress for the last two digits, tuning a different frequency than the one reported.
+
 ## Profile changes
 
 The code change alone does nothing for a user whose phrase cannot match a collapsed digit run. Suggested shipped phrases:
@@ -129,6 +143,31 @@ Link Tune [0..9] [0..9] decimal [0..9];Link Tune [3000..3999]
 ```
 
 The first form is the existing phrase, unchanged, so existing users keep working exactly as they do today. The second lets the frequency be spoken with its fixed leading 3. Between them these cover all 1000 wheel combinations, including values below 100 such as 055, which a numeric range cannot express because leading zeros are dropped.
+
+**AN/ARC-182 manual tuning**
+
+One section, digits only, no decimal word. Five digits are megahertz plus
+hundredths — `32600` is 326.00, `12325` is 123.25 — and the handler pads a
+shorter run, so `123` / `1230` / `12300` all tune 123.000.
+
+```
+Radio Frequency [432..695,25];Radio Frequency [900..1599,25];Radio Frequency [108..173];Radio Frequency [225..399];Radio Frequency 03000;Radio Frequency 03025; ... ;Radio Frequency 08775
+```
+
+The two multiplier ranges cover 108.00–173.75 and 225.00–399.75 in 25 kHz steps
+in 964 phrases rather than 30,000. The VHF-low band is spelled out as 232
+literals because a numeric range drops the leading zero and `3000` cannot be
+distinguished from 300.0 — the engine does emit `03000` when the digits are
+spoken individually, confirmed at confidence 96.
+
+Bands are the radio's own; the gaps between them are not offered, so a frequency
+the set cannot tune fails to match rather than being sent to it.
+
+This phrase shape is the general answer to the whole class of problem: a single
+section with no decimal word is the only form a normalised transcript reliably
+matches. Multi-section numeric phrases lose either to the engine collapsing
+digits across a section boundary, or to a spoken decimal arriving as a period,
+which no phrase can contain.
 
 A collapsed `99.9` still cannot be matched by any phrase — VoiceAttack cannot generate a string containing a period. Either form above avoids the problem.
 
@@ -163,6 +202,16 @@ Datalink, frequency spoken in full:
 'link tune 3209' (70) → Datalink Tune 320.90 Mhz
 'link tune 3099' (59) → Datalink Tune 309.90 Mhz
 'link tune 3261' (69) → Datalink Tune 326.10 Mhz
+```
+
+AN/ARC-182 manual tuning — a command that could not be invoked at all before,
+in any spoken form, paced or collapsed:
+
+```
+'radio frequency 32600' (98) → AN/ARC-182 Tune 326.00 MHz
+'radio frequency 03000' (79) → AN/ARC-182 Tune 030.00 MHz
+'radio frequency 12325' (66) → AN/ARC-182 Tune 123.250 MHz
+'radio frequency 12300' (96) → AN/ARC-182 Tune 123.00 MHz
 ```
 
 ## Notes
